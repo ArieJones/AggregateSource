@@ -14,6 +14,7 @@ namespace AggregateSource.SqlStreamStore
         private readonly ConcurrentUnitOfWork _unitOfWork;
         private readonly IStreamStore _eventStore;
         private readonly IEventDeserializer _deserializer;
+        private readonly int _pageSize;
 
         public AsyncRepository(Func<TAggregateRoot> rootFactory, ConcurrentUnitOfWork unitOfWork, IStreamStore eventStore, IEventDeserializer deserializer)
         {
@@ -21,30 +22,17 @@ namespace AggregateSource.SqlStreamStore
             _unitOfWork = unitOfWork ?? throw new ArgumentNullException(nameof(unitOfWork));
             _eventStore = eventStore ?? throw new ArgumentNullException(nameof(eventStore));
             _deserializer = deserializer ?? throw new ArgumentNullException(nameof(deserializer));
+            _rootFactory = rootFactory;
             _unitOfWork = unitOfWork;
             _eventStore = eventStore;
-            _deserializer = deserializer; // TODO: unit test for null argument
+            _deserializer = deserializer;
+            _pageSize = 500;
         }
 
-        public Func<TAggregateRoot> RootFactory
-        {
-            get { return _rootFactory; }
-        }
-
-        public ConcurrentUnitOfWork UnitOfWork
-        {
-            get { return _unitOfWork; }
-        }
-
-        public IStreamStore EventStore
-        {
-            get { return _eventStore; }
-        }
-
-        public IEventDeserializer EventDeserializer
-        {
-            get { return _deserializer; }
-        }
+        public Func<TAggregateRoot> RootFactory => _rootFactory;
+        public ConcurrentUnitOfWork UnitOfWork => _unitOfWork;
+        public IStreamStore EventStore => _eventStore;
+        public IEventDeserializer EventDeserializer => _deserializer;
 
         public async Task<TAggregateRoot> GetAsync(string identifier)
         {
@@ -56,39 +44,22 @@ namespace AggregateSource.SqlStreamStore
 
         public async Task<Optional<TAggregateRoot>> GetOptionalAsync(string identifier)
         {
-            Aggregate aggregate;
-
-            if (_unitOfWork.TryGet(identifier, out aggregate))
-            {
+            if (_unitOfWork.TryGet(identifier, out var aggregate))
                 return new Optional<TAggregateRoot>((TAggregateRoot)aggregate.Root);
-            }
 
-            var start = 0;
-            const int BatchSize = 500; // TODO: configurable in ReaderConfiguration
-
-            ReadStreamPage page;
-            var events = new List<StreamMessage>();
-
+            var rawEvents = new List<StreamMessage>();
+            var page = await _eventStore.ReadStreamForwards(identifier, StreamVersion.Start, _pageSize);
             do
             {
-                page = await _eventStore.ReadStreamForwards(identifier, start, BatchSize);
-
                 if (page.Status == PageReadStatus.StreamNotFound)
-                {
                     return Optional<TAggregateRoot>.Empty;
-                }
+                rawEvents.AddRange(page.Messages);
+            } while (!page.IsEnd);
 
-                events.AddRange(
-                    page.Messages);
-
-                start = page.NextStreamVersion;
-            }
-            while (!page.IsEnd);
-
-            var deserializedEvents = await Task.WhenAll(events.Select(resolvedMsg => _deserializer.DeserializeAsync(resolvedMsg)).ToArray());
+            var events = await Task.WhenAll(rawEvents.Select(resolvedMsg => _deserializer.DeserializeAsync(resolvedMsg)));
 
             var root = _rootFactory();
-            root.Initialize(deserializedEvents);
+            root.Initialize(events);
             aggregate = new Aggregate(identifier, page.LastStreamVersion, root);
             _unitOfWork.Attach(aggregate);
 
