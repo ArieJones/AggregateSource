@@ -36,7 +36,7 @@ namespace AggregateSource.SqlStreamStore
 
         public async Task<TAggregateRoot> GetAsync(string identifier)
         {
-            var result = await GetOptionalAsync(identifier);
+            var result = await GetOptionalAsync(identifier).ConfigureAwait(false);
             if (!result.HasValue)
                 throw new AggregateNotFoundException(identifier, typeof(TAggregateRoot));
             return result.Value;
@@ -48,7 +48,7 @@ namespace AggregateSource.SqlStreamStore
                 return new Optional<TAggregateRoot>((TAggregateRoot)aggregate.Root);
 
             var rawEvents = new List<StreamMessage>();
-            var page = await _eventStore.ReadStreamForwards(identifier, StreamVersion.Start, _pageSize);
+            var page = await _eventStore.ReadStreamForwards(identifier, StreamVersion.Start, _pageSize).ConfigureAwait(false);
             do
             {
                 if (page.Status == PageReadStatus.StreamNotFound)
@@ -56,7 +56,7 @@ namespace AggregateSource.SqlStreamStore
                 rawEvents.AddRange(page.Messages);
             } while (!page.IsEnd);
 
-            var events = await Task.WhenAll(rawEvents.Select(resolvedMsg => _deserializer.DeserializeAsync(resolvedMsg)));
+            var events = await Task.WhenAll(rawEvents.Select(resolvedMsg => _deserializer.DeserializeAsync(resolvedMsg))).ConfigureAwait(false);
 
             var root = _rootFactory();
             root.Initialize(events);
